@@ -41,9 +41,8 @@ export async function scanModels(dir) {
       if (!isLanguageModelGgufBasename(e.name)) continue;
       try {
         const st = await fs.stat(full);
-        const rel = path.relative(modelsDir, full).replace(/\\/g, '/') || e.name;
         out.push({
-          name: rel,
+          name: e.name,
           path: full,
           sizeGb: Math.round((st.size / 1e9) * 10) / 10
         });

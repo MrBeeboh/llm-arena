@@ -55,6 +55,10 @@
   let uploadBusy = $state(false);
   let uploadMsg = $state('');
 
+  /** @type {{scores: Record<string,number>, reasoning: string, questionId: string} | null} */
+  let scorePopup = $state(null);
+  let scorePopupTimer;
+
   let fileInput;
 
   const slots = ['A', 'B', 'C', 'D'];
@@ -98,6 +102,14 @@
             const qid = String(ev.questionId ?? '');
             const sc = /** @type {Record<string, number>} */ (ev.scores || {});
             mergeScores(qid, sc);
+            // Show score popup
+            scorePopup = {
+              scores: sc,
+              reasoning: String(ev.reasoning ?? ''),
+              questionId: qid
+            };
+            clearTimeout(scorePopupTimer);
+            scorePopupTimer = setTimeout(() => (scorePopup = null), 5000);
           }
         });
         if (e.type === 'questions_ready' && e.sessionId) {
@@ -307,7 +319,7 @@
 
 <div class="flex min-h-screen flex-col">
   <header class="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white/95 px-3 py-2 dark:border-slate-800 dark:bg-slate-950">
-    <!-- Left cluster: Arena workflow -->
+    <!-- Left: arena setup -->
     <span class="font-bold tracking-tight text-emerald-600 dark:text-emerald-400">ARENA</span>
     <button type="button" class="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40 dark:bg-emerald-700 dark:hover:bg-emerald-600"
       onclick={generateQuestions} disabled={$sequencerRunning}>Generate Questions</button>
@@ -315,28 +327,29 @@
       onclick={() => (showJudgePanel = !showJudgePanel)}>Judge ▾</button>
     <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
       onclick={() => (questionsOpen = true)} disabled={$sequencerRunning}>Load</button>
-    <span class="text-slate-300 dark:text-slate-600">|</span>
-    <div class="flex items-center gap-1">
+
+    <!-- Center: navigation + run controls -->
+    <div class="flex flex-1 items-center justify-center gap-2">
+      <span class="text-slate-300 dark:text-slate-600">|</span>
+      <div class="flex items-center gap-1">
+        <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
+          onclick={() => nav(-1)} disabled={$sequencerRunning}>&larr;</button>
+        <span class="px-2 font-mono text-xs text-slate-500 dark:text-slate-400">{$currentQuestionIndex + 1} / {Math.max(1, $questions.length)}</span>
+        <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
+          onclick={() => nav(1)} disabled={$sequencerRunning}>&rarr;</button>
+      </div>
+      <span class="text-slate-300 dark:text-slate-600">|</span>
+      <button type="button" class="rounded bg-emerald-600 px-2 py-1 text-xs text-white hover:bg-emerald-500 dark:bg-emerald-700 dark:hover:bg-emerald-600"
+        onclick={() => postRun('single')} disabled={$sequencerRunning}>Ask</button>
       <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
-        onclick={() => nav(-1)} disabled={$sequencerRunning}>&larr;</button>
-      <span class="px-2 font-mono text-xs text-slate-500 dark:text-slate-400">{$currentQuestionIndex + 1} / {Math.max(1, $questions.length)}</span>
+        onclick={() => { nav(1); }} disabled={$sequencerRunning}>Next</button>
+      <button type="button" class="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 dark:bg-emerald-700 dark:hover:bg-emerald-600"
+        onclick={() => postRun('all')} disabled={$sequencerRunning}>Run All</button>
       <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
-        onclick={() => nav(1)} disabled={$sequencerRunning}>&rarr;</button>
+        onclick={() => resetRound()} disabled={$sequencerRunning}>Reset</button>
     </div>
-    <span class="text-slate-300 dark:text-slate-600">|</span>
-    <button type="button" class="rounded bg-emerald-600 px-2 py-1 text-xs text-white hover:bg-emerald-500 dark:bg-emerald-700 dark:hover:bg-emerald-600"
-      onclick={() => postRun('single')} disabled={$sequencerRunning}>Ask</button>
-    <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
-      onclick={() => { nav(1); }} disabled={$sequencerRunning}>Next</button>
-    <button type="button" class="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 dark:bg-emerald-700 dark:hover:bg-emerald-600"
-      onclick={() => postRun('all')} disabled={$sequencerRunning}>Run All</button>
-    <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
-      onclick={() => resetRound()} disabled={$sequencerRunning}>Reset</button>
 
-    <!-- Spacer pushes tool cluster to the right -->
-    <div class="flex-1"></div>
-
-    <!-- Right cluster: model management + app settings -->
+    <!-- Right: model management + app settings -->
     <input type="file" accept=".gguf,application/octet-stream" class="hidden" bind:this={fileInput}
       disabled={$sequencerRunning || uploadBusy} onchange={onPickFile} />
     <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-800"
@@ -446,3 +459,41 @@
 
 <SettingsModal bind:open={settingsOpen} />
 <QuestionLoader bind:open={questionsOpen} />
+
+<!-- Score popup overlay -->
+{#if scorePopup}
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    role="presentation"
+    onclick={() => { scorePopup = null; clearTimeout(scorePopupTimer); }}>
+    <div class="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+      role="dialog" aria-modal="true" aria-label="Round scores"
+      onclick={(e) => e.stopPropagation()}>
+      <div class="mb-3 flex items-center justify-between">
+        <span class="text-sm font-semibold text-slate-800 dark:text-slate-200">Round scored</span>
+        <button type="button"
+          class="rounded p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+          onclick={() => { scorePopup = null; clearTimeout(scorePopupTimer); }}
+          aria-label="Close">✕</button>
+      </div>
+      <div class="space-y-2 font-mono text-sm">
+        {#each slots as r}
+          {@const v = scorePopup.scores[r]}
+          {#if v != null}
+            <div class="flex items-center gap-2">
+              <span class="w-5 text-xs font-semibold text-slate-500 dark:text-slate-400">Slot {r}</span>
+              <div class="h-2 flex-1 rounded bg-slate-200 dark:bg-slate-700">
+                <div class="h-2 rounded bg-emerald-500 transition-all" style="width:{v * 10}%"></div>
+              </div>
+              <span class="w-6 text-right font-bold text-emerald-600 dark:text-emerald-400">{v}</span>
+            </div>
+          {/if}
+        {/each}
+      </div>
+      {#if scorePopup.reasoning}
+        <p class="mt-3 border-t border-slate-200 pt-2 text-xs leading-relaxed text-slate-500 dark:border-slate-700 dark:text-slate-400">
+          {scorePopup.reasoning}
+        </p>
+      {/if}
+    </div>
+  </div>
+{/if}

@@ -153,22 +153,26 @@ export function buildLlamaProcessEnv(llamaBin) {
   const prepend = [...splitLdPaths(process.env.ARENA_EXTRA_LD_LIBRARY_PATH)];
   if (shouldAppendOneApiLd(llamaBin)) prepend.push(...discoverOneApiLibDirs());
 
-  const seen = new Set();
-  /** @type {string[]} */
-  const merged = [];
-  for (const p of prepend) {
-    if (!seen.has(p)) {
-      seen.add(p);
-      merged.push(p);
+    const seen = new Set();
+    /** @type {string[]} */
+    const merged = [];
+
+    // Parent env order is canonical (setvars.sh arranges it carefully).
+    // Append discovered paths AFTER the parent's so we never reorder.
+    for (const p of splitLdPaths(process.env.LD_LIBRARY_PATH || '')) {
+      if (!seen.has(p)) {
+        seen.add(p);
+        merged.push(p);
+      }
     }
-  }
-  for (const p of splitLdPaths(process.env.LD_LIBRARY_PATH || '')) {
-    if (!seen.has(p)) {
-      seen.add(p);
-      merged.push(p);
+    // Only add discovered dirs that the parent didn't already have.
+    for (const p of prepend) {
+      if (!seen.has(p)) {
+        seen.add(p);
+        merged.push(p);
+      }
     }
-  }
-  if (merged.length) childEnv.LD_LIBRARY_PATH = merged.join(':');
+    if (merged.length) childEnv.LD_LIBRARY_PATH = merged.join(':');
 
   /**
    * SYCL / llama.cpp: `ggml_sycl_init` → `dpct::dev_mgr` calls `select_device`. With no
@@ -251,7 +255,11 @@ async function unloadCurrentModel() {
     await waitClose(killMs);
   }
 
-  await sleep(400);
+  // GPU drivers (especially Intel Arc Level Zero) need time to release VRAM
+  // and tear down the device context after SIGKILL. Without this, the next
+  // model load often hits a fragmented or locked device and SIGABRTs.
+  const cooldownMs = Math.max(1000, parseInt(process.env.ARENA_GPU_COOLDOWN_MS || '3000', 10) || 3000);
+  await sleep(cooldownMs);
   status = 'idle';
 }
 

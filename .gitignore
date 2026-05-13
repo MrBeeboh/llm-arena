@@ -6,3 +6,4 @@ data/
 .arena-dev.pid
 .env
 models/
+ARENA_CURSOR_PROMPT_v3.md
