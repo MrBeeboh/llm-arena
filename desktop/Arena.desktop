@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Arena
+GenericName=LLM Arena
+Comment=LLM Arena — dev server and browser
+# Login shell so node/npm/nvm from ~/.profile are on PATH; cd avoids broken Path= parsing with spaces.
+Exec=/bin/bash -lc "cd \"/home/mike/Documents/Coding Projects/New Arena\" && exec \"/home/mike/Documents/Coding Projects/New Arena/scripts/launch-arena.sh\""
+Icon="/home/mike/Documents/Coding Projects/New Arena/assets/arena-icon.png"
+Terminal=false
+Categories=Development;
+StartupNotify=false

@@ -1,0 +1,21 @@
+Arena desktop shortcut (Linux)
+================================
+
+1) Make the launcher executable:
+   chmod +x "/home/mike/Documents/Coding Projects/New Arena/scripts/launch-arena.sh"
+
+2) Copy the desktop entry (edit Exec/Path/Icon if your project lives elsewhere):
+   cp "/home/mike/Documents/Coding Projects/New Arena/desktop/Arena.desktop" \
+      ~/.local/share/applications/
+
+3) Refresh the menu (optional):
+   update-desktop-database ~/.local/share/applications 2>/dev/null || true
+
+4) Pin "Arena" from your app launcher, or double-click Arena.desktop in the file manager.
+
+The icon graphic is: assets/arena-icon.png
+
+Production instead of dev: set in Arena.desktop
+  Exec=env ARENA_URL=http://127.0.0.1:5175 bash -lc 'cd "/home/mike/Documents/Coding Projects/New Arena" && npm start'
+  Terminal=true
+(Requires `npm run build` first.)

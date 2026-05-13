@@ -1,0 +1,8 @@
+node_modules/
+.svelte-kit/
+build/
+data/
+.arena-dev.log
+.arena-dev.pid
+.env
+models/

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      (function () {
+        try {
+          document.documentElement.classList.toggle(
+            'dark',
+            localStorage.getItem('arena_theme') !== 'light'
+          );
+        } catch (e) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+    %sveltekit.head%
+  </head>
+  <body
+    class="min-h-screen bg-slate-100 text-slate-900 antialiased transition-colors dark:bg-slate-950 dark:text-slate-100"
+  >
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>
