@@ -57,7 +57,7 @@ export function defaultCloudProviders() {
 }
 
 const defaults = {
-  llamaServerBin: '/home/mike/llama.cpp/build_sycl/bin/llama-server',
+  llamaServerBin: '',
   llamaPort: 8080,
   loadTimeoutSec: 600,
   ctxSize: 8192,

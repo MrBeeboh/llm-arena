@@ -6,3 +6,19 @@ html,
 body {
   height: 100%;
 }
+
+@keyframes winner-glow {
+  0%   { box-shadow: 0 0 8px 2px #fbbf24, 0 0 24px 6px #f59e0b44; }
+  50%  { box-shadow: 0 0 32px 10px #fbbf24, 0 0 64px 20px #f59e0b88; }
+  100% { box-shadow: 0 0 8px 2px #fbbf24, 0 0 24px 6px #f59e0b44; }
+}
+
+.winner-flash {
+  animation: winner-glow 0.7s ease-in-out infinite;
+  border-color: #fbbf24 !important;
+  background: linear-gradient(135deg, #1c1a00 0%, #1e293b 60%) !important;
+}
+
+.winner-flash .slot-header {
+  background: linear-gradient(90deg, #78350f44, transparent);
+}

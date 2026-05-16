@@ -9,6 +9,7 @@ import healthRoutes from './routes/health.js';
 import modelsRoutes from './routes/models.js';
 import inferenceRoutes from './routes/inference.js';
 import arenaRoutes from './routes/arena.js';
+import voteRoutes from './routes/vote.js';
 import { buildLlamaProcessEnv } from './lib/processManager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,6 +34,7 @@ await fastify.register(healthRoutes);
 await fastify.register(modelsRoutes);
 await fastify.register(inferenceRoutes);
 await fastify.register(arenaRoutes);
+await fastify.register(voteRoutes);
 
 if (isProd) {
   const buildDir = path.join(rootDir, 'build');

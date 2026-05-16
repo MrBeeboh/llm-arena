@@ -3,7 +3,7 @@ import { getStatus } from './processManager.js';
 
 /**
  * @param {string} prompt
- * @param {{ maxTokens?: number, temperature?: number }=} options
+ * @param {{ maxTokens?: number, temperature?: number, abortSignal?: AbortSignal }=} options
  */
 export async function* streamCompletion(prompt, options = {}) {
   if (getStatus() !== 'ready') {
@@ -17,11 +17,25 @@ export async function* streamCompletion(prompt, options = {}) {
     temperature: options.temperature ?? 0.7,
     cache_prompt: true
   };
-  const res = await fetch(`http://127.0.0.1:${config.llamaPort}/completion`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 300_000);
+  if (options.abortSignal) {
+    options.abortSignal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
+
+  let res;
+  try {
+    res = await fetch(`http://127.0.0.1:${config.llamaPort}/completion`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    });
+  } finally {
+    clearTimeout(tid);
+  }
+
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`completion failed: ${res.status} ${t}`);
@@ -48,7 +62,9 @@ export async function* streamCompletion(prompt, options = {}) {
         continue;
       }
       const content = chunk.content ?? '';
-      if (content) yield { content, stop: !!chunk.stop };
+      // tokens_predicted is the authoritative llama.cpp token count when stop=true
+      const tokensActual = chunk.tokens_predicted ?? null;
+      if (content) yield { content, stop: !!chunk.stop, tokensActual };
       if (chunk.stop) return;
     }
   }
@@ -56,7 +72,7 @@ export async function* streamCompletion(prompt, options = {}) {
 
 /**
  * @param {Array<{ role: string, content: string }>} messages
- * @param {{ maxTokens?: number, temperature?: number }=} options
+ * @param {{ maxTokens?: number, temperature?: number, abortSignal?: AbortSignal }=} options
  */
 export async function chatCompletion(messages, options = {}) {
   if (getStatus() !== 'ready') {
@@ -69,11 +85,25 @@ export async function chatCompletion(messages, options = {}) {
     temperature: options.temperature ?? 0,
     n_predict: options.maxTokens ?? 2048
   };
-  const res = await fetch(`http://127.0.0.1:${config.llamaPort}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 300_000);
+  if (options.abortSignal) {
+    options.abortSignal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
+
+  let res;
+  try {
+    res = await fetch(`http://127.0.0.1:${config.llamaPort}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    });
+  } finally {
+    clearTimeout(tid);
+  }
+
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`chat failed: ${res.status} ${t}`);

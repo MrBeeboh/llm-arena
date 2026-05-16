@@ -5,13 +5,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 
 const config = {
-  llamaServerBin: process.env.LLAMA_BIN || '/home/mike/llama.cpp/build_sycl/bin/llama-server',
+  llamaServerBin: process.env.LLAMA_BIN || '',
   llamaPort: parseInt(process.env.LLAMA_PORT || '8080', 10),
   modelsDir: process.env.MODELS_DIR || path.join(rootDir, 'models'),
   port: parseInt(process.env.PORT || '5175', 10),
   loadTimeoutMs: parseInt(process.env.LOAD_TIMEOUT_MS || '600000', 10),
   judgeBaseUrl: process.env.JUDGE_BASE_URL || 'https://api.x.ai/v1',
-  judgeModel: process.env.JUDGE_MODEL || 'grok-4-1-fast-non-reasoning',
+  judgeModel: process.env.JUDGE_MODEL || 'grok-3-fast',
   judgeApiKey: process.env.JUDGE_API_KEY || ''
 };
 

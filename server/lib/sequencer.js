@@ -3,6 +3,7 @@ import * as processManager from './processManager.js';
 import * as llamaClient from './llamaClient.js';
 import * as db from './db.js';
 import { getConfig } from '../config.js';
+import { setVoteSession } from '../routes/vote.js';
 
 /** @typedef {'idle' | 'running'} RunState */
 
@@ -72,20 +73,36 @@ function parseJsonFromModel(text) {
   let t = text.trim();
   const fence = /^```(?:json)?\s*([\s\S]*?)```$/im.exec(t);
   if (fence) t = fence[1].trim();
-  const start = t.indexOf('{');
-  const startArr = t.indexOf('[');
-  let slice = t;
-  if (start === -1 && startArr === -1) throw new Error('no JSON in response');
-  if (startArr !== -1 && (start === -1 || startArr < start)) {
-    slice = t.slice(startArr);
-    const end = slice.lastIndexOf(']');
-    if (end === -1) throw new Error('invalid JSON array');
-    return JSON.parse(slice.slice(0, end + 1));
+
+  // Walk from first `{` or `[` and find the matching close using a depth counter,
+  // so nested objects / trailing prose after closing brace don't confuse us.
+  const firstObj = t.indexOf('{');
+  const firstArr = t.indexOf('[');
+  if (firstObj === -1 && firstArr === -1) throw new Error('no JSON in response');
+
+  const useArr = firstArr !== -1 && (firstObj === -1 || firstArr < firstObj);
+  const open = useArr ? '[' : '{';
+  const close = useArr ? ']' : '}';
+  const start = useArr ? firstArr : firstObj;
+
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  let end = -1;
+  for (let i = start; i < t.length; i++) {
+    const ch = t[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inStr) { escape = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
   }
-  slice = t.slice(start);
-  const end = slice.lastIndexOf('}');
-  if (end === -1) throw new Error('invalid JSON object');
-  return JSON.parse(slice.slice(0, end + 1));
+  if (end === -1) throw new Error(`invalid JSON ${useArr ? 'array' : 'object'}`);
+  return JSON.parse(t.slice(start, end + 1));
 }
 
 /** @typedef {{ id?: string, name?: string, protocol: 'openai' | 'anthropic', baseUrl: string, apiKey: string, model: string }} CloudProviderConfig */
@@ -447,10 +464,12 @@ export async function runArenaRound(body) {
   } = body;
 
   const sessionId = inputSessionId || randomUUID();
+  const activeSlots = /** @type {const} */ (['A', 'B', 'C', 'D']).filter((s) => roles[s]?.model?.path);
+  setVoteSession(sessionId, activeSlots.length ? activeSlots : ['A', 'B', 'C', 'D']);
   const now = Date.now();
   const slots = /** @type {const} */ (['A', 'B', 'C', 'D']);
 
-  const judgeTemp = judgeConfig?.deterministicJudge ? 0 : 0;
+  const judgeTemp = judgeConfig?.deterministicJudge ? 0 : 0.7;
   const inferTemp = inferenceDefaults?.temperature ?? 0.7;
   const inferMax = inferenceDefaults?.maxTokens ?? 1024;
   const ctxSize = inferenceDefaults?.ctxSize ?? 8192;
@@ -534,15 +553,20 @@ export async function runArenaRound(body) {
         const t0 = Date.now();
         let text = '';
         let tokens = 0;
+        let finalTokenCount = null;
         for await (const chunk of llamaClient.streamCompletion(prompt, { temperature, maxTokens })) {
           if (signal.aborted) throw abortError();
           if (chunk.content) {
             text += chunk.content;
+            // Use word-count estimate for live display; authoritative count arrives at stop
             tokens += chunk.content.split(/\s+/).filter(Boolean).length;
             broadcast({ type: 'token', role: slot, content: chunk.content, stop: !!chunk.stop });
           }
+          if (chunk.tokensActual != null) finalTokenCount = chunk.tokensActual;
           if (chunk.stop) break;
         }
+        // Prefer llama.cpp's authoritative token count over our word-split estimate
+        if (finalTokenCount != null) tokens = finalTokenCount;
         const duration = Date.now() - t0;
         responses[slot] = text;
 

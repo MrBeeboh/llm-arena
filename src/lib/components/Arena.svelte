@@ -1,11 +1,13 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import ModelLibrary from '$lib/components/ModelLibrary.svelte';
   import SequencerStatus from '$lib/components/SequencerStatus.svelte';
   import JudgeConfig from '$lib/components/JudgeConfig.svelte';
   import QuestionLoader from '$lib/components/QuestionLoader.svelte';
   import SettingsModal from '$lib/components/SettingsModal.svelte';
+  import OddsBoard from '$lib/components/OddsBoard.svelte';
+  import RaceBar from '$lib/components/RaceBar.svelte';
   import { settings, findProviderById } from '$lib/stores/settings.js';
   import { roles, availableModels, refreshModels, modelsDirectory } from '$lib/stores/models.js';
   import {
@@ -29,12 +31,19 @@
   import { openSequencerStream } from '$lib/utils/sse.js';
   import { syncServerConfigFromSettings } from '$lib/utils/syncServerConfig.js';
   import { formatGb } from '$lib/utils/format.js';
+  import {
+    enableAudio, isAudioEnabled,
+    startAmbient, stopAmbient,
+    updateTension, stopTension,
+    playWinnerChime, playCrowdGroan
+  } from '$lib/utils/audio.js';
 
   let settingsOpen = $state(false);
   let questionsOpen = $state(false);
   let showJudgePanel = $state(false);
 
   let themeIsDark = $state(true);
+  let soundEnabled = $state(true);
 
   let judgeConfig = $state({
     difficulty: 3,
@@ -42,7 +51,6 @@
     questionCount: 10,
     judgeInstructions: '',
     judgeFeedback: '',
-    answerPrecision: 'any',
     blindReview: false,
     deterministicJudge: true,
     timeoutSec: 120
@@ -57,16 +65,68 @@
 
   /** @type {{scores: Record<string,number>, reasoning: string, questionId: string} | null} */
   let scorePopup = $state(null);
-  let scorePopupTimer;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let scorePopupTimer = null;
+
+  /** Winner state — slot that won the last judged question, held for 5s. */
+  let winnerSlot = $state(/** @type {string | null} */ (null));
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let winnerTimer = null;
+
+  /** Crowd vote state */
+  let votes = $state({ A: 0, B: 0, C: 0, D: 0 });
+  let crowdResult = $state(/** @type {{ crowdPick: string, winner: string } | null} */ (null));
+  let crowdResultTimer = null;
+  let qrUrl = $state('');
+  let qrSvg = $state('');
+  let serverIp = $state('');
+  let votesPollId = null;
 
   let fileInput;
 
   const slots = ['A', 'B', 'C', 'D'];
 
+  // QR code generator — loaded lazily so it doesn't bloat SSR
+  async function refreshQrCode(sid) {
+    if (!sid) return;
+    try {
+      const infoRes = await fetch('/api/server-info');
+      const info = await infoRes.json().catch(() => ({}));
+      const ip = (info.ips || [])[0] || location.hostname;
+      const port = info.port || 5175;
+      serverIp = ip;
+      const url = `http://${ip}:${port}/vote`;
+      qrUrl = url;
+      const QRCode = (await import('qrcode')).default;
+      qrSvg = await QRCode.toString(url, { type: 'svg', width: 140, margin: 1 });
+    } catch { /* non-fatal */ }
+  }
+
+  async function pollVotes() {
+    try {
+      const r = await fetch('/api/vote');
+      const j = await r.json().catch(() => ({}));
+      if (j.tallies) votes = { A: 0, B: 0, C: 0, D: 0, ...j.tallies };
+    } catch { /* ignore */ }
+  }
+
+  function startVotePoll() {
+    stopVotePoll();
+    pollVotes();
+    votesPollId = setInterval(pollVotes, 3000);
+  }
+
+  function stopVotePoll() {
+    if (votesPollId) { clearInterval(votesPollId); votesPollId = null; }
+  }
+
+  const RELOAD_PHASES = new Set(['ROUND_COMPLETE', 'IDLE', 'ROLE_LOAD', 'ROLE_UNLOAD', 'JUDGE_LOAD', 'JUDGE_UNLOAD']);
+
   onMount(() => {
     themeIsDark = document.documentElement.classList.contains('dark');
     void syncServerConfigFromSettings();
     refreshModels();
+
     const close = openSequencerStream(
       (e) => {
         if (e.type === 'phase' && e.phase === 'QUESTION_START') {
@@ -77,7 +137,15 @@
           liveResponses.set({});
           tokenEst = { A: 0, B: 0, C: 0, D: 0 };
           slotStats = { A: null, B: null, C: null, D: null };
+          winnerSlot = null;
+          crowdResult = null;
         }
+
+        if (e.type === 'run_start') {
+          startVotePoll();
+          if (soundEnabled) { enableAudio(); startAmbient(); }
+        }
+
         if (e.type === 'token' && e.role && typeof e.content === 'string') {
           appendLiveResponse(/** @type {string} */ (e.role), e.content);
           const r = /** @type {string} */ (e.role);
@@ -85,7 +153,14 @@
             ...tokenEst,
             [r]: (tokenEst[r] || 0) + e.content.split(/\s+/).filter(Boolean).length
           };
+          // Update tension sound based on completion ratio
+          if (soundEnabled && isAudioEnabled()) {
+            const maxTok = get(settings).maxTokens || 1024;
+            const ratio = (tokenEst[r] || 0) / maxTok;
+            updateTension(ratio);
+          }
         }
+
         if (e.type === 'stats' && e.role) {
           const r = /** @type {string} */ (e.role);
           slotStats = {
@@ -96,46 +171,105 @@
               tokensPerSec: /** @type {number} */ (e.tokens_per_sec)
             }
           };
+          stopTension();
         }
+
         applySequencerEvent(e, {
           onScores: (ev) => {
             const qid = String(ev.questionId ?? '');
             const sc = /** @type {Record<string, number>} */ (ev.scores || {});
             mergeScores(qid, sc);
-            // Show score popup
+
+            // Determine winner slot
+            const winner = Object.entries(sc).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+
+            // Crowd vote vs actual winner reveal
+            if (winner) {
+              const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+              if (totalVotes > 0) {
+                const crowdPick = Object.entries(votes).sort((a, b) => b[1] - a[1])[0]?.[0];
+                crowdResult = { crowdPick, winner };
+                if (crowdResultTimer) clearTimeout(crowdResultTimer);
+                crowdResultTimer = setTimeout(() => (crowdResult = null), 10000);
+              }
+
+              // Sound effects
+              if (soundEnabled && isAudioEnabled()) {
+                stopTension();
+                stopAmbient();
+                playWinnerChime();
+                const totalVotes2 = Object.values(votes).reduce((a, b) => a + b, 0);
+                if (totalVotes2 > 0) {
+                  const pick = Object.entries(votes).sort((a, b) => b[1] - a[1])[0]?.[0];
+                  if (pick !== winner) setTimeout(() => playCrowdGroan(), 1200);
+                }
+              }
+
+              // Winner flash — hold 5 seconds
+              winnerSlot = winner;
+              if (winnerTimer) clearTimeout(winnerTimer);
+              winnerTimer = setTimeout(() => { winnerSlot = null; }, 5000);
+            }
+
+            // Score popup
             scorePopup = {
               scores: sc,
               reasoning: String(ev.reasoning ?? ''),
               questionId: qid
             };
-            clearTimeout(scorePopupTimer);
+            if (scorePopupTimer) clearTimeout(scorePopupTimer);
             scorePopupTimer = setTimeout(() => (scorePopup = null), 5000);
           }
         });
+
         if (e.type === 'questions_ready' && e.sessionId) {
-          fetch(`/api/arena/session/${e.sessionId}/questions`)
+          const sid = String(e.sessionId);
+          fetch(`/api/arena/session/${sid}/questions`)
             .then((r) => r.json())
             .then((j) => {
               setQuestions(
                 (j.questions || []).map((q) => ({ id: q.id, text: q.text, category: q.category })),
-                e.sessionId
+                sid
               );
             })
             .catch(() => {
               statusLine.set('! Could not load generated questions from server — try Refresh or restart');
             });
         }
-        if (e.type !== 'token') refreshModels();
+
+        // Only refresh model list when model state could actually change
+        if (e.type === 'phase' && RELOAD_PHASES.has(/** @type {string} */ (e.phase))) refreshModels();
+        if (e.type === 'error' || (e.type === 'phase' && e.phase === 'IDLE')) {
+          stopAmbient(); stopTension(); stopVotePoll();
+        }
       },
       () => {}
     );
-    return close;
+
+    // QR code + votes on mount
+    const sid = get(sessionId);
+    if (sid) { refreshQrCode(sid); startVotePoll(); }
+
+    // Refresh QR when sessionId changes
+    const unsubSession = sessionId.subscribe((sid) => {
+      if (sid) { refreshQrCode(sid); startVotePoll(); }
+    });
+
+    return () => {
+      close();
+      unsubSession();
+      stopVotePoll();
+      if (scorePopupTimer) clearTimeout(scorePopupTimer);
+      if (winnerTimer) clearTimeout(winnerTimer);
+      if (crowdResultTimer) clearTimeout(crowdResultTimer);
+      stopAmbient();
+      stopTension();
+    };
   });
 
   const currentQ = $derived($questions[$currentQuestionIndex] ?? null);
   const blind = $derived(judgeConfig.blindReview);
 
-  /** Running score total per slot for the scoreboard strip */
   const slotScores = $derived(
     Object.fromEntries(
       slots.map((r) => {
@@ -143,6 +277,14 @@
         return [r, sum];
       })
     )
+  );
+
+  const activeSlots = $derived(
+    slots.filter((s) => $roles[s]?.model?.path)
+  );
+
+  const speedStats = $derived(
+    Object.fromEntries(slots.map((s) => [s, slotStats[s]?.tokensPerSec ?? 0]))
   );
 
   function setRoleModel(slot, m) {
@@ -165,6 +307,7 @@
     liveResponses.set({});
     tokenEst = { A: 0, B: 0, C: 0, D: 0 };
     slotStats = { A: null, B: null, C: null, D: null };
+    winnerSlot = null;
   }
 
   function buildCloudJudge(r, s) {
@@ -195,7 +338,12 @@
     };
   }
 
+  function activateAudioGesture() {
+    enableAudio();
+  }
+
   async function postRun(mode) {
+    activateAudioGesture();
     if (arenaRunInFlight) { statusLine.set('⟳ Arena run already starting…'); return; }
     const r = get(roles);
     const qs = get(questions);
@@ -213,6 +361,8 @@
       if (!cj.baseUrl) { statusLine.set(`! Base URL missing for "${cj.name || cj.id}" — open Settings`); return; }
     }
     arenaRunInFlight = true;
+    winnerSlot = null;
+    crowdResult = null;
     try {
       statusLine.set('⟳ Running arena…');
       const res = await fetch('/api/arena/run', {
@@ -226,10 +376,14 @@
     } catch (e) {
       statusLine.set(`! ${e instanceof Error ? e.message : String(e)}`);
       clearSequencerBusy();
-    } finally { arenaRunInFlight = false; }
+    } finally {
+      arenaRunInFlight = false;
+      stopAmbient(); stopTension();
+    }
   }
 
   async function generateQuestions() {
+    activateAudioGesture();
     if (generateQuestionsInFlight) { statusLine.set('⟳ Generate already in progress…'); return; }
     const r = get(roles);
     if (r.judge.type === 'local' && !r.judge.model) {
@@ -315,9 +469,13 @@
     themeIsDark = document.documentElement.classList.contains('dark');
     try { localStorage.setItem('arena_theme', themeIsDark ? 'dark' : 'light'); } catch {}
   }
+
+  function totalVotes() {
+    return Object.values(votes).reduce((a, b) => a + b, 0);
+  }
 </script>
 
-<div class="flex min-h-screen flex-col">
+<div class="flex min-h-screen flex-col" onclick={activateAudioGesture} role="presentation">
   <header class="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white/95 px-3 py-2 dark:border-slate-800 dark:bg-slate-950">
     <!-- Left: arena setup -->
     <span class="font-bold tracking-tight text-emerald-600 dark:text-emerald-400">ARENA</span>
@@ -363,6 +521,17 @@
     <a class="rounded border border-slate-300 px-2 py-1 text-xs text-sky-600 hover:bg-slate-100 dark:border-slate-600 dark:text-sky-400 dark:hover:bg-slate-800"
       href="https://huggingface.co/models?library=gguf&sort=trending" target="_blank" rel="noreferrer">HF</a>
     <span class="text-slate-300 dark:text-slate-600">|</span>
+    <button type="button"
+      class="rounded border px-2 py-1 text-xs"
+      class:border-emerald-600={soundEnabled}
+      class:text-emerald-400={soundEnabled}
+      class:border-slate-600={!soundEnabled}
+      class:text-slate-500={!soundEnabled}
+      class:hover:bg-slate-800={true}
+      onclick={() => { soundEnabled = !soundEnabled; if (soundEnabled) enableAudio(); }}
+      title="Toggle sound effects">
+      {soundEnabled ? '🔊' : '🔇'}
+    </button>
     <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
       onclick={() => (settingsOpen = true)}>Settings</button>
     <button type="button" class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
@@ -378,6 +547,78 @@
 
     <ModelLibrary />
 
+    <!-- Crowd vote result banner -->
+    {#if crowdResult}
+      <div class="flex items-center justify-center gap-3 rounded-lg border border-amber-700/60 bg-amber-950/80 px-4 py-3 text-sm font-bold animate-pulse">
+        <span class="text-amber-400">CROWD PICKED <span class="text-white">{crowdResult.crowdPick}</span></span>
+        <span class="text-slate-500">│</span>
+        {#if crowdResult.crowdPick === crowdResult.winner}
+          <span class="text-emerald-400">✓ CORRECT! WINNER WAS <span class="text-white">{crowdResult.winner}</span></span>
+        {:else}
+          <span class="text-red-400">✗ WINNER WAS <span class="text-white">{crowdResult.winner}</span></span>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Odds board + scoreboard row -->
+    <div class="flex flex-wrap items-center gap-2">
+      <OddsBoard {speedStats} running={$sequencerRunning} {activeSlots} />
+      {#if $questions.length > 0}
+        <div class="flex flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 dark:border-slate-700 dark:bg-slate-900/60">
+          <div class="flex items-center gap-4 font-mono text-xs">
+            <span class="font-semibold text-slate-500 dark:text-slate-400">Scores</span>
+            {#each slots as r}
+              {@const hasVotes = votes[r] > 0}
+              <span class="flex items-center gap-1">
+                <span class="text-slate-800 dark:text-slate-200">Slot {r}</span>
+                <span class="font-bold text-emerald-600 dark:text-emerald-400">{slotScores[r].toFixed(1)}</span>
+                {#if hasVotes}
+                  <span class="rounded bg-amber-900/60 px-1 text-[9px] text-amber-400" title="Crowd votes">{votes[r]}v</span>
+                {/if}
+              </span>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Race bar -->
+    {#if $sequencerRunning || Object.values(tokenEst).some((v) => v > 0)}
+      <RaceBar {tokenEst} maxTokens={$settings.maxTokens || 1024} {activeSlots} activeRole={$activeInferRole} running={$sequencerRunning} />
+    {/if}
+
+    <!-- QR code + vote tally panel (shown when a session is active) -->
+    {#if $sessionId && qrSvg}
+      <div class="flex flex-wrap items-start gap-4 rounded-lg border border-slate-700/50 bg-slate-900/60 px-4 py-3">
+        <div class="flex flex-col items-center gap-1">
+          <div class="rounded bg-white p-1" style="line-height:0">
+            {@html qrSvg}
+          </div>
+          <span class="text-center font-mono text-[10px] text-slate-500">SCAN TO VOTE</span>
+          {#if qrUrl}
+            <a href={qrUrl} target="_blank" rel="noreferrer" class="text-[10px] text-sky-500 hover:underline font-mono">{qrUrl}</a>
+          {/if}
+        </div>
+        <div class="flex flex-1 flex-col gap-2">
+          <div class="flex items-center gap-2">
+            <span class="font-mono text-xs font-bold uppercase tracking-widest text-amber-400">Crowd Vote</span>
+            <span class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400">{totalVotes()} total</span>
+          </div>
+          {#each activeSlots as slot}
+            {@const total = Math.max(1, totalVotes())}
+            {@const pct = Math.round((votes[slot] || 0) / total * 100)}
+            <div class="flex items-center gap-2">
+              <span class="w-10 font-mono text-xs font-semibold text-slate-300">Slot {slot}</span>
+              <div class="h-3 flex-1 overflow-hidden rounded-full bg-slate-800">
+                <div class="h-3 rounded-full bg-amber-500 transition-all duration-500" style="width:{pct}%"></div>
+              </div>
+              <span class="w-12 text-right font-mono text-[10px] text-slate-400">{votes[slot] || 0} ({pct}%)</span>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     {#if currentQ}
       <div class="sticky top-2 z-10 rounded-lg border border-slate-300 bg-white/95 p-3 text-sm shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/85">
         <div class="flex items-baseline justify-between gap-3">
@@ -390,35 +631,29 @@
       </div>
     {/if}
 
-    <!-- Scoreboard strip -->
-    {#if $questions.length > 0}
-      <div class="rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 dark:border-slate-700 dark:bg-slate-900/60">
-        <div class="flex items-center gap-4 font-mono text-xs">
-          <span class="font-semibold text-slate-500 dark:text-slate-400">Scores</span>
-          {#each slots as r}
-            <span class="text-slate-800 dark:text-slate-200">Slot {r}</span>
-            <span class="font-bold text-emerald-600 dark:text-emerald-400">{slotScores[r].toFixed(1)}</span>
-          {/each}
-        </div>
-      </div>
-    {/if}
-
-    <!-- Unified slot cards -->
+    <!-- Slot cards -->
     <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
       {#each slots as slot}
         {@const model = $roles[slot]?.model}
         {@const label = blind ? `Model ${slot}` : (model?.name ?? '—')}
         {@const waiting = $sequencerRunning && !!model && $activeInferRole !== slot && !$liveResponses[slot]}
         {@const active = $activeInferRole === slot}
+        {@const isWinner = winnerSlot === slot}
+        {@const isLoser = winnerSlot !== null && winnerSlot !== slot && !!model}
         {@const st = slotStats[slot]}
-        <div class="flex min-h-[260px] flex-col rounded-lg border border-slate-200 bg-white/90 shadow-sm transition-opacity dark:border-slate-700 dark:bg-slate-900/80"
-          class:opacity-40={waiting}
-          class:ring-2={active}
-          class:ring-emerald-500={active}>
+        <div
+          class="flex min-h-[260px] flex-col rounded-lg border border-slate-200 bg-white/90 shadow-sm transition-all dark:border-slate-700 dark:bg-slate-900/80"
+          class:opacity-40={waiting || isLoser}
+          class:ring-2={active && !isWinner}
+          class:ring-emerald-500={active && !isWinner}
+          class:winner-flash={isWinner}>
 
-          <!-- Header: slot label + model selector -->
-          <header class="flex items-center gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-700">
+          <!-- Header: slot label + model selector + vote badge -->
+          <header class="slot-header flex items-center gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-700">
             <span class="text-xs font-semibold text-emerald-700 dark:text-emerald-400">Slot {slot}</span>
+            {#if isWinner}
+              <span class="animate-bounce text-sm">🏆</span>
+            {/if}
             <select
               class="flex-1 min-w-0 rounded border border-slate-300 bg-white py-1 text-xs text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
               disabled={$sequencerRunning}
@@ -434,6 +669,9 @@
               {/each}
             </select>
             <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">{tokenEst[slot] ?? 0} tok</span>
+            {#if votes[slot] > 0}
+              <span class="shrink-0 rounded bg-amber-900/70 px-1.5 py-0.5 text-[10px] font-bold text-amber-300" title="Crowd votes for this slot">{votes[slot]}🗳</span>
+            {/if}
           </header>
 
           <!-- Body: answer text -->
@@ -464,15 +702,16 @@
 {#if scorePopup}
   <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
     role="presentation"
-    onclick={() => { scorePopup = null; clearTimeout(scorePopupTimer); }}>
+    onclick={() => { scorePopup = null; if (scorePopupTimer) clearTimeout(scorePopupTimer); }}>
     <div class="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-slate-700 dark:bg-slate-900"
-      role="dialog" aria-modal="true" aria-label="Round scores"
-      onclick={(e) => e.stopPropagation()}>
+      role="dialog" aria-modal="true" aria-label="Round scores" tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}>
       <div class="mb-3 flex items-center justify-between">
         <span class="text-sm font-semibold text-slate-800 dark:text-slate-200">Round scored</span>
         <button type="button"
           class="rounded p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
-          onclick={() => { scorePopup = null; clearTimeout(scorePopupTimer); }}
+          onclick={() => { scorePopup = null; if (scorePopupTimer) clearTimeout(scorePopupTimer); }}
           aria-label="Close">✕</button>
       </div>
       <div class="space-y-2 font-mono text-sm">
@@ -485,6 +724,7 @@
                 <div class="h-2 rounded bg-emerald-500 transition-all" style="width:{v * 10}%"></div>
               </div>
               <span class="w-6 text-right font-bold text-emerald-600 dark:text-emerald-400">{v}</span>
+              {#if winnerSlot === r}<span class="text-amber-400">🏆</span>{/if}
             </div>
           {/if}
         {/each}
