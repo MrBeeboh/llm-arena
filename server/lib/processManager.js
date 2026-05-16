@@ -411,6 +411,8 @@ async function loadModel(modelPath, options = {}) {
   const args = [
     '--model',
     modelPath,
+    '--alias',
+    path.basename(modelPath),
     '--n-gpu-layers',
     '-1',
     '--ctx-size',

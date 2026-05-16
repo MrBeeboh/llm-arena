@@ -16,6 +16,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 const isProd = process.env.NODE_ENV === 'production';
 
+// Load .env so LLAMA_BIN, LLAMA_PORT, etc. are always available (even when
+// the desktop launcher or restart script didn't source them into the shell).
+try {
+  const envPath = path.join(rootDir, '.env');
+  const content = fs.readFileSync(envPath, 'utf8');
+  for (const line of content.split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const eq = t.indexOf('=');
+    if (eq === -1) continue;
+    const key = t.slice(0, eq).trim();
+    if (!process.env[key]) {
+      process.env[key] = t.slice(eq + 1).trim();
+    }
+  }
+} catch {
+  /* .env is optional */
+}
+
 mergeRuntimeConfig({
   modelsDir: process.env.MODELS_DIR
     ? path.isAbsolute(process.env.MODELS_DIR)
