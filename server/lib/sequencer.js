@@ -520,30 +520,34 @@ export async function runArenaRound(body) {
       }
     }
 
+    // ── Phase 1: each contestant loads once, answers every question, then unloads ──
+    /** @type {Record<string, Record<string, string>>}  questionId → role → text */
+    const allResponses = {};
     for (let qi = start; qi <= endIndex; qi++) {
+      allResponses[questions[qi].id] = {};
+    }
+
+    for (const slot of slots) {
       if (signal.aborted) throw abortError();
-      const q = questions[qi];
-      const qtext = q.text ?? q.question ?? '';
-      broadcast({ type: 'progress', current: qi + 1, total: questions.length });
-      broadcast({ type: 'phase', phase: 'QUESTION_START', questionId: q.id, index: qi });
+      const assignment = roles[slot];
+      if (!assignment?.model?.path) continue;
 
-      /** @type {Record<string, string>} */
-      const responses = {};
+      broadcast({ type: 'phase', phase: 'CONTESTANT_LOAD', role: slot, model: assignment.model.name });
+      await processManager.loadModel(assignment.model.path, {
+        ctxSize,
+        batchSize,
+        abortSignal: signal,
+        onProgress: (line) =>
+          broadcast({ type: 'load_progress', role: slot, model: assignment.model.name, line })
+      });
+      if (signal.aborted) throw abortError();
 
-      for (const slot of slots) {
+      for (let qi = start; qi <= endIndex; qi++) {
         if (signal.aborted) throw abortError();
-        const assignment = roles[slot];
-        if (!assignment?.model?.path) continue;
-
-        broadcast({ type: 'phase', phase: 'ROLE_LOAD', role: slot, model: assignment.model.name });
-        await processManager.loadModel(assignment.model.path, {
-          ctxSize,
-          batchSize,
-          abortSignal: signal,
-          onProgress: (line) =>
-            broadcast({ type: 'load_progress', role: slot, model: assignment.model.name, line })
-        });
-        if (signal.aborted) throw abortError();
+        const q = questions[qi];
+        const qtext = q.text ?? q.question ?? '';
+        broadcast({ type: 'progress', current: qi + 1, total: questions.length, role: slot });
+        broadcast({ type: 'phase', phase: 'CONTESTANT_QUESTION', role: slot, questionId: q.id, index: qi });
 
         const prompt = `Answer clearly and completely:\n\n${qtext}\n`;
         const po = panelOverrides?.[slot] ?? {};
@@ -559,17 +563,15 @@ export async function runArenaRound(body) {
           if (signal.aborted) throw abortError();
           if (chunk.content) {
             text += chunk.content;
-            // Use word-count estimate for live display; authoritative count arrives at stop
             tokens += chunk.content.split(/\s+/).filter(Boolean).length;
             broadcast({ type: 'token', role: slot, content: chunk.content, stop: !!chunk.stop });
           }
           if (chunk.tokensActual != null) finalTokenCount = chunk.tokensActual;
           if (chunk.stop) break;
         }
-        // Prefer llama.cpp's authoritative token count over our word-split estimate
         if (finalTokenCount != null) tokens = finalTokenCount;
         const duration = Date.now() - t0;
-        responses[slot] = text;
+        allResponses[q.id][slot] = text;
 
         broadcast({
           type: 'stats',
@@ -590,13 +592,32 @@ export async function runArenaRound(body) {
           token_count: tokens,
           duration_ms: duration
         });
-
-        broadcast({ type: 'phase', phase: 'ROLE_UNLOAD', role: slot });
-        await processManager.unloadCurrentModel();
       }
 
+      broadcast({ type: 'phase', phase: 'CONTESTANT_UNLOAD', role: slot });
+      await processManager.unloadCurrentModel();
+    }
+
+    // ── Phase 2: judge all questions (load judge once if local) ──
+    if (roles.judge.type === 'local') {
+      if (!roles.judge.model?.path) throw new Error('no local judge model');
+      broadcast({ type: 'phase', phase: 'JUDGE_LOAD', role: 'judge', model: roles.judge.model.name });
+      await processManager.loadModel(roles.judge.model.path, {
+        ctxSize,
+        batchSize,
+        abortSignal: signal,
+        onProgress: (line) =>
+          broadcast({ type: 'load_progress', role: 'judge', model: roles.judge.model.name, line })
+      });
       if (signal.aborted) throw abortError();
-      broadcast({ type: 'phase', phase: 'JUDGE_PHASE_START' });
+    }
+
+    for (let qi = start; qi <= endIndex; qi++) {
+      if (signal.aborted) throw abortError();
+      const q = questions[qi];
+      const qtext = q.text ?? q.question ?? '';
+      const responses = allResponses[q.id] || {};
+      broadcast({ type: 'phase', phase: 'JUDGE_PHASE_START', questionId: q.id, index: qi });
 
       const activeRoles = slots.filter((s) => responses[s]);
       if (activeRoles.length === 0) {
@@ -629,24 +650,12 @@ export async function runArenaRound(body) {
           abortSignal: signal
         });
       } else {
-        if (!roles.judge.model?.path) throw new Error('no local judge model');
-        broadcast({ type: 'phase', phase: 'JUDGE_LOAD', role: 'judge', model: roles.judge.model.name });
-        await processManager.loadModel(roles.judge.model.path, {
-          ctxSize,
-          batchSize,
-          abortSignal: signal,
-          onProgress: (line) =>
-            broadcast({ type: 'load_progress', role: 'judge', model: roles.judge.model.name, line })
-        });
-        if (signal.aborted) throw abortError();
         broadcast({ type: 'phase', phase: 'JUDGE_SCORE' });
         judgeRaw = await llamaClient.chatCompletion([{ role: 'user', content: judgeUserPrompt }], {
           temperature: judgeTemp,
           maxTokens: 2048,
           model: roles.judge.model?.name
         });
-        broadcast({ type: 'phase', phase: 'JUDGE_UNLOAD', role: 'judge' });
-        await processManager.unloadCurrentModel();
       }
 
       const parsed = parseJsonFromModel(judgeRaw);
@@ -672,6 +681,11 @@ export async function runArenaRound(body) {
         reasoning
       });
       broadcast({ type: 'phase', phase: 'QUESTION_SCORED', questionId: q.id });
+    }
+
+    if (roles.judge.type === 'local') {
+      broadcast({ type: 'phase', phase: 'JUDGE_UNLOAD', role: 'judge' });
+      await processManager.unloadCurrentModel();
     }
 
     broadcast({ type: 'phase', phase: 'ROUND_COMPLETE' });
