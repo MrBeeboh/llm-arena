@@ -520,20 +520,6 @@ export async function runArenaRound(body) {
       }
     }
 
-    // ── Load judge once before the rounds (if local) ──
-    if (roles.judge.type === 'local') {
-      if (!roles.judge.model?.path) throw new Error('no local judge model');
-      broadcast({ type: 'phase', phase: 'JUDGE_LOAD', role: 'judge', model: roles.judge.model.name });
-      await processManager.loadModel(roles.judge.model.path, {
-        ctxSize,
-        batchSize,
-        abortSignal: signal,
-        onProgress: (line) =>
-          broadcast({ type: 'load_progress', role: 'judge', model: roles.judge.model.name, line })
-      });
-      if (signal.aborted) throw abortError();
-    }
-
     // ── The race: one round per question ──
     for (let qi = start; qi <= endIndex; qi++) {
       if (signal.aborted) throw abortError();
@@ -610,6 +596,20 @@ export async function runArenaRound(body) {
 
       // ── The crowd watches the judge score this round ──
       if (signal.aborted) throw abortError();
+
+      if (roles.judge.type === 'local') {
+        if (!roles.judge.model?.path) throw new Error('no local judge model');
+        broadcast({ type: 'phase', phase: 'JUDGE_LOAD', role: 'judge', model: roles.judge.model.name });
+        await processManager.loadModel(roles.judge.model.path, {
+          ctxSize,
+          batchSize,
+          abortSignal: signal,
+          onProgress: (line) =>
+            broadcast({ type: 'load_progress', role: 'judge', model: roles.judge.model.name, line })
+        });
+        if (signal.aborted) throw abortError();
+      }
+
       broadcast({ type: 'phase', phase: 'JUDGE_PHASE_START', questionId: q.id });
 
       const activeRoles = slots.filter((s) => responses[s]);
@@ -675,12 +675,11 @@ export async function runArenaRound(body) {
         reasoning
       });
       broadcast({ type: 'phase', phase: 'QUESTION_SCORED', questionId: q.id });
-    }
 
-    // Judge stays loaded across all rounds — unload at the very end.
-    if (roles.judge.type === 'local') {
-      broadcast({ type: 'phase', phase: 'JUDGE_UNLOAD', role: 'judge' });
-      await processManager.unloadCurrentModel();
+      if (roles.judge.type === 'local') {
+        broadcast({ type: 'phase', phase: 'JUDGE_UNLOAD', role: 'judge' });
+        await processManager.unloadCurrentModel();
+      }
     }
 
     broadcast({ type: 'phase', phase: 'ROUND_COMPLETE' });
