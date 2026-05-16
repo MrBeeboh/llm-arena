@@ -12,6 +12,7 @@ export async function* streamCompletion(prompt, options = {}) {
   const config = getConfig();
   const body = {
     prompt,
+    model: options.model ?? 'local',
     stream: true,
     n_predict: options.maxTokens ?? 1024,
     temperature: options.temperature ?? 0.7,
@@ -81,6 +82,7 @@ export async function chatCompletion(messages, options = {}) {
   const config = getConfig();
   const body = {
     messages,
+    model: options.model ?? 'local',
     stream: false,
     temperature: options.temperature ?? 0,
     n_predict: options.maxTokens ?? 2048

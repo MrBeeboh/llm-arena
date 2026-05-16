@@ -382,7 +382,8 @@ Return ONLY a valid JSON array, no text outside the array:
       broadcast({ type: 'phase', phase: 'JUDGE_GENERATE' });
       raw = await llamaClient.chatCompletion([{ role: 'user', content: questionGenPrompt }], {
         temperature: 0.3,
-        maxTokens: 8192
+        maxTokens: 8192,
+        model: roles.judge.model?.name
       });
       broadcast({ type: 'phase', phase: 'JUDGE_UNLOAD', role: 'judge' });
       await processManager.unloadCurrentModel();
@@ -554,7 +555,7 @@ export async function runArenaRound(body) {
         let text = '';
         let tokens = 0;
         let finalTokenCount = null;
-        for await (const chunk of llamaClient.streamCompletion(prompt, { temperature, maxTokens })) {
+        for await (const chunk of llamaClient.streamCompletion(prompt, { temperature, maxTokens, model: assignment.model.name })) {
           if (signal.aborted) throw abortError();
           if (chunk.content) {
             text += chunk.content;
@@ -641,7 +642,8 @@ export async function runArenaRound(body) {
         broadcast({ type: 'phase', phase: 'JUDGE_SCORE' });
         judgeRaw = await llamaClient.chatCompletion([{ role: 'user', content: judgeUserPrompt }], {
           temperature: judgeTemp,
-          maxTokens: 2048
+          maxTokens: 2048,
+          model: roles.judge.model?.name
         });
         broadcast({ type: 'phase', phase: 'JUDGE_UNLOAD', role: 'judge' });
         await processManager.unloadCurrentModel();
