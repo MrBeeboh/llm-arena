@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from '../config.js';
@@ -503,6 +503,37 @@ async function loadModel(modelPath, options = {}) {
   } finally {
     progressListener = null;
   }
+  // Guard: verify our spawned PID actually owns the port. A rogue llama-server
+  // from LM Studio or a previous run could be squatting on it, in which case
+  // /health would pass but completions would fail with "model not found".
+  try {
+    let out = '';
+    try {
+      out = execFileSync(
+        'bash',
+        ['-c', `lsof -ti TCP:${config.llamaPort} -sTCP:LISTEN 2>/dev/null || true`],
+        { encoding: 'utf8', timeout: 3000 }
+      );
+    } catch {
+      // lsof not found — skip guard
+    }
+    const pids = out.split('\n').map((l) => parseInt(l.trim(), 10)).filter((p) => p > 0);
+    if (pids.length === 0) {
+      throw new Error('llama-server port has no listener after health check passed');
+    }
+    if (!pids.includes(proc.pid)) {
+      throw new Error(
+        `llama-server port ${config.llamaPort} is owned by PID ${pids.join(',')} instead of spawned PID ${proc.pid}. A rogue llama-server (LM Studio?) is squatting. Kill it and restart Arena.`
+      );
+    }
+  } catch (e) {
+    if (e.message?.includes('spawned PID') || e.message?.includes('no listener')) {
+      try { await unloadCurrentModel(); } catch {}
+      throw e;
+    }
+    // lsof missing — non-fatal
+  }
+
   currentModelPath = modelPath;
   status = 'ready';
 }

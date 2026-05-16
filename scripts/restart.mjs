@@ -126,7 +126,8 @@ async function main() {
     }
   }
 
-  const devPorts = [PORT, VITE_PORT];
+  const LLAMA_PORT = parseInt(process.env.LLAMA_PORT || '8080', 10);
+  const devPorts = [PORT, VITE_PORT, LLAMA_PORT];
   let free = await waitPortsFree(devPorts, 12000);
   if (!free) {
     console.warn('Ports still busy — sending SIGTERM to listeners via lsof…');
