@@ -612,61 +612,104 @@ export async function runArenaRound(body) {
       if (signal.aborted) throw abortError();
     }
 
+    // Build one batch scoring prompt with all questions and responses.
+    // The crowd watches a single judging event, not per-question micro-judgments.
+    broadcast({ type: 'phase', phase: 'JUDGE_PHASE_START' });
+    const blind = !!judgeConfig?.blindReview;
+    /** @type {Record<string, Record<string, string>>}  questionId → label → role */
+    const blindMaps = {};
+
+    let batchPrompt = `You are an impartial judge scoring AI responses across multiple questions.
+Evaluate each response on: accuracy, completeness, reasoning quality, conciseness.
+Score each response 0–10. Return ONLY valid JSON, no text outside the JSON object:
+
+{"questions": [`;
+
+    let first = true;
     for (let qi = start; qi <= endIndex; qi++) {
-      if (signal.aborted) throw abortError();
       const q = questions[qi];
       const qtext = q.text ?? q.question ?? '';
       const responses = allResponses[q.id] || {};
-      broadcast({ type: 'phase', phase: 'JUDGE_PHASE_START', questionId: q.id, index: qi });
 
       const activeRoles = slots.filter((s) => responses[s]);
+
+      if (!first) batchPrompt += ',';
+      first = false;
+
       if (activeRoles.length === 0) {
-        broadcast({ type: 'scores', questionId: q.id, scores: {}, reasoning: 'no contestant responses' });
+        batchPrompt += `\n{"questionId":${JSON.stringify(q.id)},"question":${JSON.stringify(qtext)},"scores":{},"reasoning":"no contestant responses"}`;
         continue;
       }
 
-      const { prompt: judgeUserPrompt, anonToRole } = buildScoringPrompt(
-        qtext,
-        responses,
-        !!judgeConfig?.blindReview,
-        judgeConfig?.judgeFeedback
-      );
-
-      let judgeRaw = '';
-      if (roles.judge.type === 'cloud') {
-        const cfg = resolveCloudConfig(body);
-        broadcast({
-          type: 'phase',
-          phase: 'JUDGE_SCORE',
-          model: cfg.model,
-          provider: cfg.name || cfg.id || cfg.protocol
-        });
-        judgeRaw = await cloudChatCompletion({
-          provider: cfg,
-          messages: [{ role: 'user', content: judgeUserPrompt }],
-          temperature: judgeTemp,
-          maxTokens: 2048,
-          timeoutMs,
-          abortSignal: signal
-        });
-      } else {
-        broadcast({ type: 'phase', phase: 'JUDGE_SCORE' });
-        judgeRaw = await llamaClient.chatCompletion([{ role: 'user', content: judgeUserPrompt }], {
-          temperature: judgeTemp,
-          maxTokens: 2048,
-          model: roles.judge.model?.name
-        });
+      let anonToRole = null;
+      if (blind) {
+        const labels = ['alpha', 'beta', 'gamma', 'delta'];
+        const perm = [...activeRoles].sort(() => Math.random() - 0.5);
+        anonToRole = {};
+        perm.forEach((role, i) => { anonToRole[labels[i]] = role; });
+        blindMaps[q.id] = anonToRole;
       }
 
-      const parsed = parseJsonFromModel(judgeRaw);
-      const scoresRaw = parsed.scores || {};
-      const reasoning = String(parsed.reasoning ?? '');
+      batchPrompt += `\n{"questionId":${JSON.stringify(q.id)},"question":${JSON.stringify(qtext)},"responses":{`;
+      let firstResp = true;
+      for (const role of activeRoles) {
+        if (!firstResp) batchPrompt += ',';
+        firstResp = false;
+        const label = anonToRole ? Object.keys(anonToRole).find((k) => anonToRole[k] === role) || role : role;
+        batchPrompt += `${JSON.stringify(label)}:${JSON.stringify(responses[role])}`;
+      }
+      batchPrompt += '}}';
+    }
+
+    batchPrompt += '\n]}\n\nOnly include questionIds that were provided. Scores are integers 0–10.';
+    if (judgeConfig?.judgeFeedback) {
+      batchPrompt += `\nCorrection hint from user: ${judgeConfig.judgeFeedback}`;
+    }
+
+    // ── Single judging call — the crowd watches one event ──
+    broadcast({ type: 'phase', phase: 'JUDGE_SCORE' });
+
+    let judgeRaw = '';
+    if (roles.judge.type === 'cloud') {
+      const cfg = resolveCloudConfig(body);
+      broadcast({
+        type: 'phase',
+        phase: 'JUDGE_SCORE',
+        model: cfg.model,
+        provider: cfg.name || cfg.id || cfg.protocol
+      });
+      judgeRaw = await cloudChatCompletion({
+        provider: cfg,
+        messages: [{ role: 'user', content: batchPrompt }],
+        temperature: judgeTemp,
+        maxTokens: 8192,
+        timeoutMs: Math.max(timeoutMs, 60000),
+        abortSignal: signal
+      });
+    } else {
+      judgeRaw = await llamaClient.chatCompletion([{ role: 'user', content: batchPrompt }], {
+        temperature: judgeTemp,
+        maxTokens: 8192,
+        model: roles.judge.model?.name
+      });
+    }
+
+    const parsed = parseJsonFromModel(judgeRaw);
+    const qArr = parsed.questions || [];
+    if (!Array.isArray(qArr)) throw new Error('judge response missing "questions" array');
+
+    for (const qScore of qArr) {
+      const qid = qScore.questionId;
+      if (!qid) continue;
+      const scoresRaw = qScore.scores || {};
+      const reasoning = String(qScore.reasoning ?? '');
+      const anonToRole = blindMaps[qid] || null;
       const scores = remapBlindScores(scoresRaw, anonToRole);
 
       for (const role of Object.keys(scores)) {
         db.insertScore({
           session_id: sessionId,
-          question_id: q.id,
+          question_id: qid,
           role,
           score: Number(scores[role]),
           reasoning,
@@ -676,12 +719,13 @@ export async function runArenaRound(body) {
 
       broadcast({
         type: 'scores',
-        questionId: q.id,
+        questionId: qid,
         scores,
         reasoning
       });
-      broadcast({ type: 'phase', phase: 'QUESTION_SCORED', questionId: q.id });
     }
+
+    broadcast({ type: 'phase', phase: 'ALL_SCORED' });
 
     if (roles.judge.type === 'local') {
       broadcast({ type: 'phase', phase: 'JUDGE_UNLOAD', role: 'judge' });
