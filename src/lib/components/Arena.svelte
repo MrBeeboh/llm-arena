@@ -87,8 +87,7 @@
   const slots = ['A', 'B', 'C', 'D'];
 
   // QR code generator — loaded lazily so it doesn't bloat SSR
-  async function refreshQrCode(sid) {
-    if (!sid) return;
+  async function refreshQrCode(_sid) {
     try {
       const infoRes = await fetch('/api/server-info');
       const info = await infoRes.json().catch(() => ({}));
@@ -246,13 +245,14 @@
       () => {}
     );
 
-    // QR code + votes on mount
+    // QR code always shown — generate on mount regardless of session
+    refreshQrCode(null);
     const sid = get(sessionId);
-    if (sid) { refreshQrCode(sid); startVotePoll(); }
+    if (sid) startVotePoll();
 
-    // Refresh QR when sessionId changes
+    // Refresh QR when sessionId changes (also start vote poll)
     const unsubSession = sessionId.subscribe((sid) => {
-      if (sid) { refreshQrCode(sid); startVotePoll(); }
+      if (sid) startVotePoll();
     });
 
     return () => {
@@ -582,19 +582,17 @@
       {/if}
     </div>
 
-    <!-- Race bar -->
-    {#if $sequencerRunning || Object.values(tokenEst).some((v) => v > 0)}
-      <RaceBar {tokenEst} maxTokens={$settings.maxTokens || 1024} {activeSlots} activeRole={$activeInferRole} running={$sequencerRunning} />
-    {/if}
+    <!-- Race bar — always visible -->
+    <RaceBar {tokenEst} maxTokens={$settings.maxTokens || 1024} {activeSlots} activeRole={$activeInferRole} running={$sequencerRunning} />
 
-    <!-- QR code + vote tally panel (shown when a session is active) -->
-    {#if $sessionId && qrSvg}
+    <!-- QR code + vote tally panel — always visible once server-info loads -->
+    {#if qrSvg}
       <div class="flex flex-wrap items-start gap-4 rounded-lg border border-slate-700/50 bg-slate-900/60 px-4 py-3">
         <div class="flex flex-col items-center gap-1">
           <div class="rounded bg-white p-1" style="line-height:0">
             {@html qrSvg}
           </div>
-          <span class="text-center font-mono text-[10px] text-slate-500">SCAN TO VOTE</span>
+          <span class="text-center font-mono text-[10px] text-slate-500">{$sessionId ? 'SCAN TO VOTE' : 'SCAN TO VOTE IN NEXT ROUND'}</span>
           {#if qrUrl}
             <a href={qrUrl} target="_blank" rel="noreferrer" class="text-[10px] text-sky-500 hover:underline font-mono">{qrUrl}</a>
           {/if}
